@@ -1,16 +1,15 @@
 """两个压缩序列的逐事件比对。
 
-加速必须**两侧各自独立成立**，绝不允许用一侧的周期去推断另一侧：
+加速必须**先验证、后跳过**，且任何跳过都不能越过较短一侧的结束点或
+repeat 的连续周期区间：
 
 1. 每次先比较当前事件（音高/休止/时值）。
 2. **算术块跳转**：两侧都位于 repeat 周期边界、且重复单元为同一（结构共享）
-   孩子项时，取两侧副本长度的 LCM 为联合周期，先实走一个联合周期确认
-   相等，再按双方各自“到下一个非无缝接缝/序列尾”的剩余量，跳过共同允许的
-   整周期数（取两侧 min）。
-3. **独立签名周期兜底**：对每个游标分别维护“结构签名 -> 位置”。只有当
-   **两侧在当前位置都重遇了自己的签名**（各自独立呈现周期性）时才跳过，
-   跳转量取两侧周期与各自剩余量的共同最小值，因此永远不会越过较短一侧的
-   结束点。这也覆盖合并休止 repeat、concat token 等一般周期结构。
+   孩子项时，先实走一个 LCM 联合周期验证，再跳过共同允许的整周期数。
+3. **签名周期兜底**：对每个游标分别维护“结构签名 -> 位置”。当两侧在当前
+   位置都重遇自己的签名时，各自从锚点起在当前 repeat 区间内严格周期；
+   但签名重复**不能保证两侧彼此相等**，所以必须从当前位置先实走验证一整个
+   联合周期，逐事件相等才跳过，并把跳过量限制在各自周期区间剩余量内。
 """
 
 from __future__ import annotations
@@ -36,9 +35,21 @@ def _lcm(a: int, b: int) -> int:
     return a // gcd(a, b) * b
 
 
+def _difference(ca: Cursor, cb: Cursor) -> Difference:
+    """构造差异：任一侧结束时另一侧给出当前事件。"""
+    if ca.exhausted:
+        beat = cb.beat()
+        sa, sb = None, cb.peek()
+    else:
+        beat = ca.beat()
+        sa, sb = ca.peek(), (None if cb.exhausted else cb.peek())
+    return Difference(beat, sa, sb)
+
+
 def compare_terms(a: Term, b: Term) -> Difference | None:
     """返回第一处差异；完全一致（起音/音高/休止/时值）返回 None。"""
     ca, cb = Cursor(a, 0), Cursor(b, 0)
+    # 每个相位签名首次出现的位置；据此识别“当前位置是否为某周期的整数倍”。
     seen_a: dict[tuple, int] = {}
     seen_b: dict[tuple, int] = {}
     steps = 0
@@ -51,76 +62,80 @@ def compare_terms(a: Term, b: Term) -> Difference | None:
             )
 
         if ca.exhausted or cb.exhausted:
-            beat = cb.beat() if ca.exhausted else ca.beat()
-            sa = ca.peek() if not ca.exhausted else None
-            sb = cb.peek() if not cb.exhausted else None
-            return Difference(beat, sa, sb)
+            return _difference(ca, cb)
 
         sa, sb = ca.peek(), cb.peek()
         if not sa.event.same_music(sb.event):
             return Difference(ca.beat(), sa, sb)
 
-        # 算术块跳转：两侧 repeat 周期边界且重复单元是同一结构共享孩子。
+        pos = ca.position()
+
+        # (A) 算术块跳转：同一结构共享孩子的 repeat。
         ra = ca.innermost_repeat_skip()
         rb = cb.innermost_repeat_skip()
         if ra is not None and rb is not None and ra[2] is rb[2]:
-            m1, rw1, _ = ra
-            m2, rw2, _ = rb
-            joint = _lcm(m1, m2)
-            nblocks = min(rw1 // joint, rw2 // joint)
+            joint = _lcm(ra[0], rb[0])
+            nblocks = min(ra[1] // joint, rb[1] // joint)
             if nblocks >= 2:
-                pos = ca.position()
                 ok, diff = _walk_equal(ca, cb, joint)
                 if diff is not None:
                     return diff
                 if not ok:
                     return diff
-                # 双方各自只跳过共同允许的整周期数，保留最后一个联合周期实走
                 skip = (nblocks - 1) * joint
-                ca.seek(pos + skip + joint)
-                cb.seek(pos + skip + joint)
+                ca.seek(pos + joint + skip)
+                cb.seek(pos + joint + skip)
                 seen_a, seen_b = {}, {}
                 continue
 
-        ca.advance()
-        cb.advance()
-        if ca.exhausted and cb.exhausted:
-            return None
-        if ca.exhausted or cb.exhausted:
-            continue
-
-        # 独立签名周期兜底：两侧各自重遇自己的签名才跳过。
-        pos = ca.position()
-        sa_sig, sb_sig = ca.signature(), cb.signature()
-        jump = 0
-        prev_a = seen_a.get(sa_sig)
-        prev_b = seen_b.get(sb_sig)
-        if prev_a is not None and prev_b is not None:
-            da, db = pos - prev_a, pos - prev_b
-            # 两侧周期相同（位置始终同步，da==db），并保留至少一个周期实走
-            period = min(da, db)
-            k = min(ca.remaining(), cb.remaining()) // period
-            if period > 0 and k >= 2:
-                jump = (k - 1) * period
-        if jump:
-            ca.seek(pos + jump)
-            cb.seek(pos + jump)
-            seen_a, seen_b = {}, {}
-        else:
-            seen_a.setdefault(sa_sig, pos)
-            seen_b.setdefault(sb_sig, pos)
+        # (B) 签名周期兜底：判断“当前位置是否为两侧各自周期的整数倍”。
+        # 对每一侧，当前签名在位置 origin（< pos）首次出现且
+        # (pos-origin) 是相位周期 ⇒ pos 是该侧某个周期的整数倍边界。
+        sig_a, sig_b = ca.signature(), cb.signature()
+        origin_a = seen_a.get(sig_a)
+        origin_b = seen_b.get(sig_b)
+        jumped = False
+        if origin_a is not None and origin_b is not None:
+            period = _lcm(pos - origin_a, pos - origin_b)
+            rwa, rwb = ca.periodic_runway(), cb.periodic_runway()
+            if (
+                period > 0
+                and rwa is not None
+                and rwb is not None
+                and period <= rwa
+                and period <= rwb
+            ):
+                # 先从当前位置实走一整个联合周期验证；窗口内任何差异
+                # （包括两侧周期不同造成的错位）都会被立即捕获。
+                ok, diff = _walk_equal(ca, cb, period)
+                if diff is not None:
+                    return diff
+                if ok:
+                    left = min(ca.periodic_runway() or 0, cb.periodic_runway() or 0)
+                    nfull = left // period
+                    if nfull >= 2:
+                        skip = (nfull - 1) * period
+                        ca.seek(pos + period + skip)
+                        cb.seek(pos + period + skip)
+                        seen_a, seen_b = {}, {}
+                        jumped = True
+        if not jumped:
+            seen_a.setdefault(sig_a, pos)
+            seen_b.setdefault(sig_b, pos)
+            ca.advance()
+            cb.advance()
 
     return None
 
 
 def _walk_equal(ca: Cursor, cb: Cursor, n: int) -> tuple[bool, Difference | None]:
-    """从当前位置实走 n 个事件，确认两侧逐事件相等（不检测结束）。"""
+    """从当前位置实走 n 个事件，确认两侧逐事件相等。
+
+    成功时游标停在“下一事件”位置（已前进 n 步）；失败时立即返回第一处差异。
+    """
     for _ in range(n):
         if ca.exhausted or cb.exhausted:
-            beat = cb.beat() if ca.exhausted else ca.beat()
-            sa = ca.peek() if not ca.exhausted else None
-            sb = cb.peek() if not cb.exhausted else None
-            return False, Difference(beat, sa, sb)
+            return False, _difference(ca, cb)
         sa, sb = ca.peek(), cb.peek()
         if not sa.event.same_music(sb.event):
             return False, Difference(ca.beat(), sa, sb)

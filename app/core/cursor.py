@@ -304,6 +304,42 @@ class Cursor:
             break
         return period, rem, child_term
 
+    def periodic_runway(self) -> int | None:
+        """当前位置在“最近 repeat 连续周期区间”内还剩多少事件（含当前事件）。
+
+        签名重遇只能保证在同一个 repeat 的连续输出区间内逐事件周期重复；
+        一旦跨过该 repeat 的末尾（进入 concat 的下一槽或外层后续结构），
+        周期不再成立。返回 None 表示当前不在任何 repeat 区间内（不允许
+        仅凭签名跳转）。
+        """
+        if self.leaf is None:
+            return None
+        deepest = None
+        for d in range(len(self.stack) - 1, -1, -1):
+            if self.stack[d].term.kind == REPEAT:
+                deepest = d
+                break
+        if deepest is None:
+            return None
+
+        rem: int | None = None
+        for d in range(deepest, -1, -1):
+            fr = self.stack[d]
+            k = fr.term.kind
+            if k == REPEAT:
+                here = fr.term.count - fr.p
+                rem = here if rem is None else min(rem, here)
+            elif k in (REVERSE, STRETCH, PITCH):
+                continue
+            elif k == CONCAT:
+                si = bisect_right(fr.term.slot_start, fr.p) - 1
+                slot_end = fr.term.slot_start[si] + fr.term.slots[si].length
+                rem = min(rem, slot_end - fr.p)
+                break
+            else:
+                break
+        return rem
+
 
 @dataclass(slots=True)
 class CursorState:
