@@ -1,1 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+
+# 原仓库保留
 *.tsbuildinfo
