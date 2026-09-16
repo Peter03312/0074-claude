@@ -10,10 +10,12 @@ WORKDIR /app
 COPY requirements.txt requirements-test.txt ./
 RUN pip install --no-cache-dir -r requirements-test.txt
 
-# 复制应用与测试
+# 复制应用、测试与 verify 脚本
 COPY app ./app
 COPY tests ./tests
+COPY scripts ./scripts
 COPY conftest.py pytest.ini ./
+RUN chmod +x scripts/verify.sh
 
 EXPOSE 8000
 

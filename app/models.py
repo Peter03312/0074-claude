@@ -18,6 +18,11 @@ MAX_EVENTS_EXPANDED = 1_000_000_000_000_000  # 规范事件数硬上限 10^15
 MAX_COMPARE_STEPS = 4_000_000  # 压缩比对允许的结构步数
 MAX_PITCH = 127
 
+# 严格整数：拒绝布尔（True/False 是 int 子类）与浮点被静默当作音高/编号。
+StrictInt = Annotated[int, Field(strict=True)]
+NonNegInt = Annotated[int, Field(strict=True, ge=0)]
+PitchInt = Annotated[int, Field(strict=True, ge=0, le=127)]
+
 
 # ---------- 请求 ----------
 class FractionIn(BaseModel):
@@ -25,8 +30,8 @@ class FractionIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    n: int
-    d: int = 1
+    n: StrictInt
+    d: StrictInt = 1
 
     @field_validator("d")
     @classmethod
@@ -44,7 +49,7 @@ class NoteItem(_ItemBase):
     """发声项：MIDI 0..127 音高 + 正时值 + 可选 tie_next。"""
 
     type: Literal["note"]
-    pitch: int = Field(ge=0, le=127)
+    pitch: PitchInt
     duration: FractionIn
     tie_next: bool = False
 
@@ -62,7 +67,7 @@ Item = Annotated[NoteItem | RestItem, Field(discriminator="type")]
 class _NodeBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: int = Field(ge=0)
+    id: NonNegInt
 
 
 class PhraseNode(_NodeBase):
@@ -72,35 +77,35 @@ class PhraseNode(_NodeBase):
 
 class ConcatNode(_NodeBase):
     op: Literal["concat"]
-    children: list[int]
+    children: list[NonNegInt]
 
 
 class RepeatNode(_NodeBase):
     op: Literal["repeat"]
-    child: int
-    count: int = Field(ge=0, le=MAX_REPEAT_COUNT)
+    child: NonNegInt
+    count: StrictInt = Field(strict=True, ge=0, le=MAX_REPEAT_COUNT)
 
 
 class TransposeNode(_NodeBase):
     op: Literal["transpose"]
-    child: int
-    k: int
+    child: NonNegInt
+    k: StrictInt
 
 
 class PitchMirrorNode(_NodeBase):
     op: Literal["pitch_mirror"]
-    child: int
+    child: NonNegInt
     axis: FractionIn
 
 
 class ReverseNode(_NodeBase):
     op: Literal["reverse"]
-    child: int
+    child: NonNegInt
 
 
 class StretchNode(_NodeBase):
     op: Literal["stretch"]
-    child: int
+    child: NonNegInt
     q: FractionIn
 
 
@@ -113,8 +118,8 @@ Node = Annotated[
 class AnalyzeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected_root: int = Field(ge=0)
-    handwritten_root: int = Field(ge=0)
+    expected_root: NonNegInt
+    handwritten_root: NonNegInt
     nodes: list[Node]
 
 

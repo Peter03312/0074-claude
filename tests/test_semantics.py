@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.compare import compare_terms
@@ -651,3 +652,150 @@ def test_no_floats_in_response():
     assert "." not in text.replace("1.0", "") or "n" in text
     data = r.json()
     assert data["total_duration"] == {"n": 1, "d": 3}
+
+
+# ---------- 缺陷回归 ----------
+def test_regression_repeats_different_length_end_beat():
+    """两段重复旋律长度不同：手抄提前结束时，拍点必须是其真实结束拍点。"""
+    payload = {
+        "expected_root": 2,
+        "handwritten_root": 3,
+        "nodes": [
+            {"id": 0, "op": "phrase", "items": [note(60)]},
+            {"id": 1, "op": "phrase", "items": [note(60)]},
+            {"id": 2, "op": "repeat", "child": 0, "count": 6},
+            {"id": 3, "op": "repeat", "child": 1, "count": 4},
+        ],
+    }
+    r = client.post("/analyze", json=payload)
+    assert r.status_code == 200
+    fd = r.json()["first_difference"]
+    assert fd["beat"] == {"n": 4, "d": 1}  # 不是 5
+    assert fd["handwritten"]["status"] == "ended"
+    assert fd["expected"]["status"] == "event"
+
+
+def test_regression_repeats_different_length_with_rest_merge_end_beat():
+    payload = {
+        "expected_root": 2,
+        "handwritten_root": 3,
+        "nodes": [
+            {"id": 0, "op": "phrase", "items": [rest(1), note(60), rest(2)]},
+            {"id": 1, "op": "phrase", "items": [rest(1), note(60), rest(2)]},
+            {"id": 2, "op": "repeat", "child": 0, "count": 5},
+            {"id": 3, "op": "repeat", "child": 1, "count": 3},
+        ],
+    }
+    r = client.post("/analyze", json=payload)
+    fd = r.json()["first_difference"]
+    # 合并休止：3 副本总时长 = 4 + 3 + 3 = 10。beat 10 处两侧都在休止上，
+    # 但预期侧是“边界休止”（3 拍，尾2+下一首1），手抄侧是最终尾部（2 拍）。
+    assert fd["beat"] == {"n": 10, "d": 1}
+    assert fd["handwritten"]["status"] == "event"
+    assert fd["handwritten"]["event"]["duration"] == {"n": 2, "d": 1}
+    assert fd["expected"]["status"] == "event"
+    assert fd["expected"]["event"]["duration"] == {"n": 3, "d": 1}
+
+
+def test_regression_deep_transform_chain_is_200():
+    """合法但深层（>默认递归上限）的单孩子变换链不应产生 500。"""
+    depth = 1500
+    nodes = [{"id": 0, "op": "phrase", "items": [note(60)]}]
+    for i in range(1, depth + 1):
+        nodes.append({"id": i, "op": "transpose", "child": i - 1, "k": 0})
+    r = client.post(
+        "/analyze",
+        json={"expected_root": depth, "handwritten_root": depth, "nodes": nodes},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["equal"] is True
+
+
+def test_regression_deep_nested_repeat_chain_is_200():
+    depth = 1500
+    nodes = [{"id": 0, "op": "phrase", "items": [note(60)]}]
+    for i in range(1, depth + 1):
+        nodes.append({"id": i, "op": "repeat", "child": i - 1, "count": 1})
+    r = client.post(
+        "/analyze",
+        json={"expected_root": depth, "handwritten_root": depth, "nodes": nodes},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_regression_dangling_tie_on_last_note_is_422():
+    payload = {
+        "expected_root": 0,
+        "handwritten_root": 0,
+        "nodes": [{"id": 0, "op": "phrase", "items": [note(60), note(62, tie=True)]}],
+    }
+    r = client.post("/analyze", json=payload)
+    assert r.status_code == 422
+    loc = r.json()["detail"][0]["loc"]
+    assert loc == "/nodes/0/items/1"
+
+
+def test_regression_dangling_tie_single_note_is_422():
+    payload = {
+        "expected_root": 0,
+        "handwritten_root": 0,
+        "nodes": [{"id": 0, "op": "phrase", "items": [note(60, tie=True)]}],
+    }
+    r = client.post("/analyze", json=payload)
+    assert r.status_code == 422
+
+
+def test_regression_boolean_pitch_rejected():
+    payload = {
+        "expected_root": 0,
+        "handwritten_root": 0,
+        "nodes": [
+            {"id": 0, "op": "phrase",
+             "items": [{"type": "note", "pitch": True,
+                        "duration": {"n": 1, "d": 1}}]}
+        ],
+    }
+    r = client.post("/analyze", json=payload)
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == "/nodes/0/items/0/pitch"
+
+
+@pytest.mark.parametrize("field,value", [("n", True), ("d", False)])
+def test_regression_boolean_fraction_parts_rejected(field, value):
+    payload = {
+        "expected_root": 0,
+        "handwritten_root": 0,
+        "nodes": [
+            {"id": 0, "op": "phrase",
+             "items": [{"type": "rest", "duration": {field: value}}]}
+        ],
+    }
+    r = client.post("/analyze", json=payload)
+    assert r.status_code == 422
+
+
+def test_regression_boolean_count_rejected():
+    payload = {
+        "expected_root": 1,
+        "handwritten_root": 1,
+        "nodes": [
+            {"id": 0, "op": "phrase", "items": [note(60)]},
+            {"id": 1, "op": "repeat", "child": 0, "count": True},
+        ],
+    }
+    r = client.post("/analyze", json=payload)
+    assert r.status_code == 422
+
+
+def test_regression_float_pitch_rejected():
+    payload = {
+        "expected_root": 0,
+        "handwritten_root": 0,
+        "nodes": [
+            {"id": 0, "op": "phrase",
+             "items": [{"type": "note", "pitch": 60.5,
+                        "duration": {"n": 1}}]}
+        ],
+    }
+    r = client.post("/analyze", json=payload)
+    assert r.status_code == 422

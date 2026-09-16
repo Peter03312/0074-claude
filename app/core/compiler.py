@@ -150,6 +150,14 @@ class Compiler:
         items_loc = join(loc, "items")
 
         i = 0
+        last = len(items) - 1
+        # 预校验：任何 tie_next 都必须有紧邻的下一项；最后一项标 tie_next 非法。
+        for i0, it0 in enumerate(items):
+            if it0.type == "note" and it0.tie_next and i0 == last:
+                raise SemanticError(
+                    "连音标记后必须紧邻一个同音高音符（最后一个音符不能连音）",
+                    join(items_loc, i0),
+                )
         while i < len(items):
             it = items[i]
             if it.type == "note":

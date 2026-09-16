@@ -40,6 +40,24 @@ async def semantic_error_handler(_: Request, exc: SemanticError) -> JSONResponse
     )
 
 
+@app.exception_handler(RecursionError)
+async def recursion_error_handler(_: Request, __: RecursionError) -> JSONResponse:
+    # 节点数已被限制在 2000、递归上限也已调高；走到这里说明表达式嵌套
+    # 深度仍然过深，按“规模越界”整单拒绝，而不是抛出 500。
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "loc": "/nodes",
+                    "msg": "表达式嵌套深度超过可处理上限",
+                    "type": "depth_limit",
+                }
+            ]
+        },
+    )
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     _: Request, exc: RequestValidationError
